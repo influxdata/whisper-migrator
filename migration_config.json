@@ -1,0 +1,39 @@
+[
+  {
+    "pattern": "carbon.relays.#TEXT1.#TEXT2",
+    "measurement": "#TEXT2",
+    "tags": [
+      {
+        "tagkey": "host",
+        "tagvalue": "#TEXT1"
+      }
+    ],
+    "field": "value"
+  },
+  {
+    "pattern": "TLM.Sentinel.#TEXT1.#TEXT2.#TEXT3",
+    "measurement": "#TEXT3",
+    "tags": [
+      {
+        "tagkey": "host",
+        "tagvalue": "#TEXT1"
+      },
+      {
+        "tagkey": "computing",
+        "tagvalue": "#TEXT2"
+      }
+    ],
+    "field": "something"
+  },
+  {
+    "pattern": "carbon.agents.#TEXT1.#TEXT2",
+    "measurement": "#TEXT2",
+    "tags": [
+      {
+        "tagkey": "host",
+        "tagvalue": "#TEXT1"
+      }
+    ],
+    "field": "value"
+  }
+]
