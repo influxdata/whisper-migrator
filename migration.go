@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,13 +30,15 @@ type ShardInfo struct {
 }
 
 type MigrationData struct {
-	influxDataDir string
-	from          time.Time
-	until         time.Time
-	dbName        string
-	wspFiles      []string
-	shards        []ShardInfo
-	tagConfigs    []TagConfig
+	influxDataDir   string
+	from            time.Time
+	until           time.Time
+	dbName          string
+	wspFiles        []string
+	shards          []ShardInfo
+	tagConfigs      []TagConfig
+	whisperFileSize int64
+	tsmFileSize     int64
 }
 
 type TsmPoint struct {
@@ -98,6 +101,10 @@ func main() {
 
 	migrationData.ReadTagConfig(*tagConfigFile)
 	migrationData.FindWhisperFiles(*wspPath)
+	if len(migrationData.wspFiles) == 0 {
+		fmt.Println("No Whisper files found")
+		return
+	}
 	migrationData.PreviewMTF()
 	//Update the config file
 	migrationData.WriteConfigFile(*tagConfigFile)
@@ -108,10 +115,14 @@ func main() {
 	if userInput != "YES" {
 		return
 	}
+	timestart := time.Now()
 	// Create shards for given time ranges
 	migrationData.CreateShards()
 	//Map WSP to TSM
 	migrationData.MapWSPToTSMByShard()
+	timeend := time.Now()
+	migrationData.PrintSummary(timeend.Sub(timestart).String())
+
 }
 
 // Read the config file and populate migrartionData.tagConfigs
@@ -141,48 +152,77 @@ func (migrationData *MigrationData) WriteConfigFile(filename string) {
 }
 
 // Creates new config as per user's input
-func NewConfig() *TagConfig {
+func NewConfig(wspFile string) *TagConfig {
 	newTagConfig := &TagConfig{}
-	fmt.Println(`Tag config does not exist, You will be prompted to enter
-				Pattern Measurement tags and field`)
+	fmt.Println("-------------------------------------------------------")
+	fmt.Println("Tag config not found for", wspFile, `
+		You will be prompted to enter Pattern, Measurement, Tags and Field`)
+	fmt.Println("-------------------------------------------------------")
 	fmt.Println(`Please enter pattern e.g. carbon.agents.#TEXT1.#TEXT2.#TEXT3
-		 Look at the migration_config.json for more examples`)
+		Look at the migration_config.json for more examples->`)
 
 	fmt.Scanf("%s", &newTagConfig.Pattern)
-
+	if len(newTagConfig.Pattern) == 0 {
+		return nil
+	}
 	fmt.Println(`Please enter measurement e.g. #TEXT3 ,\n#TEXT3 will be replaced
-		with actual value`)
+		with actual value->`)
 	fmt.Scanf("%s", &newTagConfig.Measurement)
+	if len(newTagConfig.Measurement) == 0 {
+		return nil
+	}
 
 	fmt.Println(`Please enter tags e.g. host=#TEXT1 loc=#TEXT2
 		\n host and loc are the tag keys and #TEXT1, #TEXT2 will be replaced
-		actual tag values`)
+		actual tag values->`)
 
 	var tagDataStr string
 	fmt.Scanf("%s", &tagDataStr)
 
-	tagDataStrings := strings.Split(tagDataStr, " ")
-	var tagKeyValue TagKeyValue
-	newTagConfig.Tags = make([]TagKeyValue, len(tagDataStrings))
-	for i := 0; i < len(tagDataStrings); i++ {
-		tagKeyValueStr := strings.Split(tagDataStrings[i], "=")
-
-		tagKeyValue.Tagkey = strings.Trim(tagKeyValueStr[0], " ")
-		tagKeyValue.Tagvalue = strings.Trim(tagKeyValueStr[1], " ")
-		newTagConfig.Tags[i] = tagKeyValue
+	if len(tagDataStr) != 0 {
+		tagDataStrings := strings.Split(tagDataStr, " ")
+		var tagKeyValue TagKeyValue
+		newTagConfig.Tags = make([]TagKeyValue, len(tagDataStrings))
+		for i := 0; i < len(tagDataStrings); i++ {
+			tagKeyValueStr := strings.Split(tagDataStrings[i], "=")
+			if len(tagKeyValueStr) < 2 {
+				continue
+			}
+			tagKeyValue.Tagkey = strings.Trim(tagKeyValueStr[0], " ")
+			tagKeyValue.Tagvalue = strings.Trim(tagKeyValueStr[1], " ")
+			newTagConfig.Tags[i] = tagKeyValue
+		}
 	}
 
-	fmt.Println(`Please enter Field e.g. value`)
+	fmt.Println(`Please enter Field e.g. value->`)
 	fmt.Scanf("%s", &newTagConfig.Field)
-	return newTagConfig
+
+	fmt.Println("You have entered->")
+	fmt.Println("Pattern:", newTagConfig.Pattern)
+	fmt.Println("Measurement:", newTagConfig.Measurement)
+	fmt.Println("Tags:", newTagConfig.Tags)
+	fmt.Println("Field:", newTagConfig.Field)
+	fmt.Println("Do you want to add this pattern?(YES/NO):")
+	var confirmPattern string
+	fmt.Scanf("%s", &confirmPattern)
+	if confirmPattern == "YES" {
+		return newTagConfig
+	} else {
+		return nil
+	}
 }
 
 // Find all whisper files from a given wspPath
 func (migrationData *MigrationData) FindWhisperFiles(searchDir string) {
+
 	fileList := []string{}
 	err := filepath.Walk(searchDir, func(path string, f os.FileInfo, err error) error {
+		if os.IsNotExist(err) { //search dir does not exist
+			return nil
+		}
 		if strings.HasSuffix(f.Name(), "wsp") {
 			fileList = append(fileList, path)
+			migrationData.whisperFileSize = migrationData.whisperFileSize + f.Size()
 		}
 		return nil
 	})
@@ -201,7 +241,12 @@ func (migrationData *MigrationData) PreviewMTF() {
 		var mtf *MTF
 		if mtf = migrationData.GetMTF(wspFile); mtf != nil {
 		} else { //Create and add the pattern
-			tagConfig = NewConfig()
+			for {
+				tagConfig = NewConfig(wspFile)
+				if tagConfig != nil {
+					break
+				}
+			}
 			migrationData.tagConfigs = append(migrationData.tagConfigs, *tagConfig)
 
 			mtf = &MTF{Measurement: tagConfig.Measurement, Tags: tagConfig.Tags,
@@ -290,21 +335,26 @@ func (migrationData *MigrationData) CreateShards() {
 // and  Writes to the respective TSM file
 func (migrationData *MigrationData) MapWSPToTSMByShard() {
 	var from, until time.Time
+	var wg sync.WaitGroup
 	for _, shard := range migrationData.shards {
 		from = shard.from
-		if shard.from.Before(migrationData.from) {
+		if shard.from.Before(migrationData.from) && shard.until.After(migrationData.from) {
 			from = migrationData.from
 		}
 		until = shard.until
 		if shard.until.After(migrationData.until) {
 			until = migrationData.until
 		}
-
-		tsmPoints := migrationData.MapWSPToTSMByWhisperFile(from, until)
-		//Write the TSM data
-		filename := migrationData.GetTSMFileName(shard)
-		migrationData.WriteTSMPoints(filename, tsmPoints)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tsmPoints := migrationData.MapWSPToTSMByWhisperFile(from, until)
+			//Write the TSM data
+			filename := migrationData.GetTSMFileName(shard)
+			migrationData.WriteTSMPoints(filename, tsmPoints)
+		}()
 	}
+	wg.Wait()
 	return
 }
 
@@ -317,30 +367,37 @@ func (migrationData *MigrationData) MapWSPToTSMByWhisperFile(from time.Time, unt
 
 	for _, wspFile := range migrationData.wspFiles {
 		w, err := whisper.Open(wspFile)
+		fmt.Println("Migrating Data From ", wspFile, "For TimeRange ", from, until)
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer w.Close()
 		wspTime, _ := w.GetOldest()
 		if from.Before(time.Unix(int64(wspTime), 0)) {
+			w.Close()
 			continue
 		}
 
 		//the first argument is interval, since it's not required for migration
 		//using _
 		_, wspPoints, err := w.FetchUntilTime(from, until)
+		w.Close()
 		if err != nil {
 			log.Fatal(err)
 		}
+
 		if len(wspPoints) == 0 {
 			continue
 		}
-
 		var tagConfig *TagConfig
 		var mtf *MTF
 		if mtf = migrationData.GetMTF(wspFile); mtf != nil {
 		} else { //Create and add the pattern
-			tagConfig = NewConfig()
+			for {
+				tagConfig = NewConfig(wspFile)
+				if tagConfig != nil {
+					break
+				}
+			}
 			migrationData.tagConfigs = append(migrationData.tagConfigs, *tagConfig)
 
 			mtf = &MTF{Measurement: tagConfig.Measurement, Tags: tagConfig.Tags,
@@ -408,6 +465,13 @@ func (migrationData *MigrationData) WriteTSMPoints(filename string,
 		panic(fmt.Sprintf("write TSM index: %v", err))
 	}
 
+	fileinfo, err := f.Stat()
+	if err != nil {
+		fmt.Println("Could not read filestat", err)
+		return
+	}
+	migrationData.tsmFileSize = migrationData.tsmFileSize + fileinfo.Size()
+	fmt.Println("TSM File ", filename, "Size ", fileinfo.Size())
 	if err := tsmWriter.Close(); err != nil {
 		panic(fmt.Sprintf("write TSM close: %v", err))
 	}
@@ -482,4 +546,19 @@ func (migrationData *MigrationData) GetMTF(wspFilename string) *MTF {
 	mtf.Measurement = remArr[len(remArr)-1]
 	mtf.Field = tagConfig.Field
 	return &mtf
+}
+
+// Print Migration Summary
+func (migrationData *MigrationData) PrintSummary(duration string) {
+	fmt.Printf("|------------------------------------|\n")
+	fmt.Printf("|------Migration Summary-------------|\n")
+	fmt.Printf("|------------------------------------|\n")
+	fmt.Printf("| No. of whisper files migrated %d|\n", len(migrationData.wspFiles))
+	fmt.Printf("| TimeTaken %v |\n", duration)
+	fmt.Printf("| Total Whisper File Size %.2f GB |\n", float64(migrationData.whisperFileSize)/float64(1024*1024*1024))
+	fmt.Printf("| Total TSM File Size     %.2f GB |\n", float64(migrationData.tsmFileSize)/float64(1024*1024*1024))
+	var percentage float64
+	percentage = float64(migrationData.whisperFileSize-migrationData.tsmFileSize) / float64(migrationData.whisperFileSize) * 100.0
+	fmt.Printf("| Percentage of size reduction %.2f\n", percentage)
+	fmt.Printf("|------------------------------------|\n")
 }
