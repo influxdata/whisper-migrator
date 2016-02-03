@@ -89,10 +89,15 @@ func main() {
 		port            = flag.String("port", "8086", "Port on which influxdb is running")
 	)
 	flag.Parse()
-	if *option == "NULL" || *wspPath == "NULL" || *influxDataDir == "NULL" || *from == "NULL" ||
+	if *option == "NULL" || *wspPath == "NULL" ||  *from == "NULL" ||
 		*tagConfigFile == "NULL" {
 		usage()
 	}
+
+	if *option =="TSMW" && *influxDataDir == "NULL" {
+		usage()
+	}
+
 	migrationData := &MigrationData{
 		option:          *option,
 		dbName:          *dbName,
