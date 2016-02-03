@@ -18,9 +18,16 @@ import (
 )
 
 func usage() {
-	log.Fatal(`migration.go -wspPath=whisper folder -influxDataDir=influx data folder
-		-info -from=<2015-11-01> -until=<2015-12-30> -dbname=migrated
-		-tagconfig=config.json`)
+	log.Fatal(`migration.go -option=TSMW -wspPath=whisper folder
+		-influxDataDir=influx data folder
+		-from=<2015-11-01> -until=<2015-12-30> -dbname=migrated
+		-retentionPolicy=default -tagconfig=config.json
+
+		OR
+
+		migration.go -option=ClientV2 -wspPath=whisper folder
+		-from=<2015-11-01> -until=<2015-12-30> -dbname=migrated -host=http://localhost
+		-port=8086, -retentionPolicy=default -tagconfig=config.json`)
 }
 
 type ShardInfo struct {
@@ -30,6 +37,7 @@ type ShardInfo struct {
 }
 
 type MigrationData struct {
+	option          string
 	influxDataDir   string
 	from            time.Time
 	until           time.Time
@@ -39,6 +47,9 @@ type MigrationData struct {
 	tagConfigs      []TagConfig
 	whisperFileSize int64
 	tsmFileSize     int64
+	retentionPolicy string
+	host            string
+	port            string
 }
 
 type TsmPoint struct {
@@ -66,22 +77,30 @@ type MTF struct {
 
 func main() {
 	var (
-		wspPath       = flag.String("wspPath", "NULL", "Whisper files folder path")
-		influxDataDir = flag.String("influxDataDir", "NULL", "InfluxDB data directory")
-		from          = flag.String("from", "NULL", "from date in YYYY-MM-DD format")
-		until         = flag.String("until", "NULL", "until date in YYYY-MM-DD format")
-		dbName        = flag.String("dbname", "migrated", "Database name (default: migrated")
-		tagConfigFile = flag.String("tagconfig", "NULL", "Configuration file for measurement and tags")
+		option          = flag.String("option", "NULL", "Use TSMWriter or ClientV2 for migration")
+		wspPath         = flag.String("wspPath", "NULL", "Whisper files folder path")
+		influxDataDir   = flag.String("influxDataDir", "NULL", "InfluxDB data directory")
+		from            = flag.String("from", "NULL", "from date in YYYY-MM-DD format")
+		until           = flag.String("until", "NULL", "until date in YYYY-MM-DD format")
+		dbName          = flag.String("dbname", "migrated", "Database name (default: migrated")
+		tagConfigFile   = flag.String("tagconfig", "NULL", "Configuration file for measurement and tags")
+		retentionPolicy = flag.String("retentionPolicy", "default", "Retention Policy")
+		host            = flag.String("host", "http://localhost", "Host name where influxdb is running")
+		port            = flag.String("port", "8086", "Port on which influxdb is running")
 	)
 	flag.Parse()
-	if *wspPath == "NULL" || *influxDataDir == "NULL" || *tagConfigFile == "NULL" {
+	if *option == "NULL" || *wspPath == "NULL" || *influxDataDir == "NULL" || *from == "NULL" ||
+		*tagConfigFile == "NULL" {
 		usage()
 	}
-	migrationData := &MigrationData{dbName: *dbName, influxDataDir: *influxDataDir}
-
-	if *from == "NULL" {
-		*from = "2008-01-01" //TODO: check if this is correct assumption the date is
-	} // based on graphite project's github project
+	migrationData := &MigrationData{
+		option:          *option,
+		dbName:          *dbName,
+		influxDataDir:   *influxDataDir,
+		retentionPolicy: *retentionPolicy,
+		host:            *host,
+		port:            *port,
+	}
 
 	var err error
 	migrationData.from, err = time.Parse("2006-01-02", *from)
@@ -117,12 +136,15 @@ func main() {
 	}
 	timestart := time.Now()
 	// Create shards for given time ranges
-	migrationData.CreateShards()
-	//Map WSP to TSM
-	migrationData.MapWSPToTSMByShard()
+	if migrationData.option != "TSMW" {
+		migrationData.WriteUsingV2()
+	} else {
+		migrationData.CreateShards()
+		//Map WSP to TSM
+		migrationData.MapWSPToTSMByShard()
+	}
 	timeend := time.Now()
 	migrationData.PrintSummary(timeend.Sub(timestart).String())
-
 }
 
 // Read the config file and populate migrartionData.tagConfigs
@@ -367,7 +389,7 @@ func (migrationData *MigrationData) MapWSPToTSMByWhisperFile(from time.Time, unt
 
 	for _, wspFile := range migrationData.wspFiles {
 		w, err := whisper.Open(wspFile)
-		fmt.Println("Migrating Data From ", wspFile, "For TimeRange ", from, until)
+		fmt.Println("Migrating Data From ", wspFile, "For TimeRange ", from, until, "Size", w.Header.Archives[0].Size())
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -555,10 +577,108 @@ func (migrationData *MigrationData) PrintSummary(duration string) {
 	fmt.Printf("|------------------------------------|\n")
 	fmt.Printf("| No. of whisper files migrated %d|\n", len(migrationData.wspFiles))
 	fmt.Printf("| TimeTaken %v |\n", duration)
-	fmt.Printf("| Total Whisper File Size %.2f GB |\n", float64(migrationData.whisperFileSize)/float64(1024*1024*1024))
-	fmt.Printf("| Total TSM File Size     %.2f GB |\n", float64(migrationData.tsmFileSize)/float64(1024*1024*1024))
-	var percentage float64
-	percentage = float64(migrationData.whisperFileSize-migrationData.tsmFileSize) / float64(migrationData.whisperFileSize) * 100.0
-	fmt.Printf("| Percentage of size reduction %.2f\n", percentage)
+	fmt.Printf("| Total Whisper File Size %.4f GB |\n", float64(migrationData.whisperFileSize)/float64(1024*1024*1024))
+	if migrationData.option == "TSMW" {
+		fmt.Printf("| Total TSM File Size     %.4f GB |\n", float64(migrationData.tsmFileSize)/float64(1024*1024*1024))
+		var percentage float64
+		percentage = float64(migrationData.whisperFileSize-migrationData.tsmFileSize) / float64(migrationData.whisperFileSize) * 100.0
+		fmt.Printf("| Percentage of size reduction %.2f\n", percentage)
+	}
 	fmt.Printf("|------------------------------------|\n")
+}
+
+func (migrationData *MigrationData) WriteUsingV2() {
+	from := migrationData.from
+	until := migrationData.until
+	c, _ := client.NewHTTPClient(client.HTTPConfig{
+		Addr: migrationData.host + ":" + migrationData.port,
+	})
+	defer c.Close()
+
+	createDBString := fmt.Sprintf("Create Database %v", migrationData.dbName)
+	createDBQuery := client.NewQuery(createDBString, "", "")
+	_, err := c.Query(createDBQuery)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	totalPoints := 0
+	var bp client.BatchPoints
+	bp, _ = client.NewBatchPoints(client.BatchPointsConfig{
+		Database:  migrationData.dbName,
+		Precision: "s",
+	})
+	var wg sync.WaitGroup
+
+	for _, wspFile := range migrationData.wspFiles {
+		w, err := whisper.Open(wspFile)
+		fmt.Println("Migrating Data From ", wspFile, "For TimeRange ", from, until, "Size", w.Header.Archives[0].Size())
+		if err != nil {
+			log.Fatal(err)
+		}
+		wspTime, _ := w.GetOldest()
+		if from.After(time.Unix(int64(wspTime), 0)) {
+			w.Close()
+			continue
+		}
+
+		//the first argument is interval, since it's not required for migration
+		//using _
+		_, wspPoints, err := w.FetchUntilTime(from, until)
+		w.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		if len(wspPoints) == 0 {
+			continue
+		}
+		var tagConfig *TagConfig
+		var mtf *MTF
+		if mtf = migrationData.GetMTF(wspFile); mtf != nil {
+		} else { //Create and add the pattern
+			for {
+				tagConfig = NewConfig(wspFile)
+				if tagConfig != nil {
+					break
+				}
+			}
+			migrationData.tagConfigs = append(migrationData.tagConfigs, *tagConfig)
+
+			mtf = &MTF{Measurement: tagConfig.Measurement, Tags: tagConfig.Tags,
+				Field: tagConfig.Field}
+		}
+
+		var tags map[string]string
+		tags = make(map[string]string)
+		for _, tagConfigTag := range mtf.Tags {
+			tags[tagConfigTag.Tagkey] = tagConfigTag.Tagvalue
+		}
+		var fields map[string]interface{}
+		fields = make(map[string]interface{})
+
+		for _, wspPoint := range wspPoints {
+			fields[mtf.Field] = wspPoint.Value
+			pt, _ := client.NewPoint(mtf.Measurement, tags, fields,
+				time.Unix(int64(wspPoint.Timestamp), 0))
+			bp.AddPoint(pt)
+
+			totalPoints = totalPoints + 1
+			if totalPoints >= 5000 {
+				wg.Add(1)
+				go func() {
+					c.Write(bp)
+					defer wg.Done()
+				}()
+				totalPoints = 0
+				bp, _ = client.NewBatchPoints(client.BatchPointsConfig{
+					Database:  migrationData.dbName,
+					Precision: "s",
+				})
+			}
+		}
+	}
+	wg.Wait()
+	return
 }
