@@ -362,7 +362,6 @@ func (migrationData *MigrationData) CreateShards() {
 // and  Writes to the respective TSM file
 func (migrationData *MigrationData) MapWSPToTSMByShard() {
 	var from, until time.Time
-	var wg sync.WaitGroup
 	for _, shard := range migrationData.shards {
 		from = shard.from
 		if shard.from.Before(migrationData.from) && shard.until.After(migrationData.from) {
@@ -372,16 +371,14 @@ func (migrationData *MigrationData) MapWSPToTSMByShard() {
 		if shard.until.After(migrationData.until) {
 			until = migrationData.until
 		}
-		wg.Add(1)
+		ch:= make(chan []TsmPoint)
 		go func() {
-			defer wg.Done()
-			tsmPoints := migrationData.MapWSPToTSMByWhisperFile(from, until)
-			//Write the TSM data
-			filename := migrationData.GetTSMFileName(shard)
-			migrationData.WriteTSMPoints(filename, tsmPoints)
-		}()
+			 ch <- migrationData.MapWSPToTSMByWhisperFile(from, until)
+			}()
+		//Write the TSM data
+		filename := migrationData.GetTSMFileName(shard)
+		migrationData.WriteTSMPoints(filename, <-ch)
 	}
-	wg.Wait()
 	return
 }
 
