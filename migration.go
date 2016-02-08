@@ -27,7 +27,8 @@ func usage() {
 
 		migration.go -option=ClientV2 -wspPath=whisper folder
 		-from=<2015-11-01> -until=<2015-12-30> -dbname=migrated -host=http://localhost
-		-port=8086, -retentionPolicy=default -tagconfig=config.json`)
+		-port=8086, -retentionPolicy=default -tagconfig=config.json -username=<username>,
+		-password=<password>`)
 }
 
 type ShardInfo struct {
@@ -50,6 +51,8 @@ type MigrationData struct {
 	retentionPolicy string
 	host            string
 	port            string
+	username        string
+	password        string
 }
 
 type TsmPoint struct {
@@ -87,14 +90,16 @@ func main() {
 		retentionPolicy = flag.String("retentionPolicy", "default", "Retention Policy")
 		host            = flag.String("host", "http://localhost", "Host name where influxdb is running")
 		port            = flag.String("port", "8086", "Port on which influxdb is running")
+		username        = flag.String("username", "NULL", "Username for influxdb auth")
+		password        = flag.String("password", "NULL", "Password for influxdb auth")
 	)
 	flag.Parse()
-	if *option == "NULL" || *wspPath == "NULL" ||  *from == "NULL" ||
+	if *option == "NULL" || *wspPath == "NULL" || *from == "NULL" ||
 		*tagConfigFile == "NULL" {
 		usage()
 	}
 
-	if *option =="TSMW" && *influxDataDir == "NULL" {
+	if *option == "TSMW" && *influxDataDir == "NULL" {
 		usage()
 	}
 
@@ -105,6 +110,8 @@ func main() {
 		retentionPolicy: *retentionPolicy,
 		host:            *host,
 		port:            *port,
+		username:        *username,
+		password:        *password,
 	}
 
 	var err error
@@ -371,10 +378,10 @@ func (migrationData *MigrationData) MapWSPToTSMByShard() {
 		if shard.until.After(migrationData.until) {
 			until = migrationData.until
 		}
-		ch:= make(chan []TsmPoint)
+		ch := make(chan []TsmPoint)
 		go func() {
-			 ch <- migrationData.MapWSPToTSMByWhisperFile(from, until)
-			}()
+			ch <- migrationData.MapWSPToTSMByWhisperFile(from, until)
+		}()
 		//Write the TSM data
 		filename := migrationData.GetTSMFileName(shard)
 		migrationData.WriteTSMPoints(filename, <-ch)
@@ -593,7 +600,9 @@ func (migrationData *MigrationData) WriteUsingV2() {
 	from := migrationData.from
 	until := migrationData.until
 	c, _ := client.NewHTTPClient(client.HTTPConfig{
-		Addr: migrationData.host + ":" + migrationData.port,
+		Addr:     migrationData.host + ":" + migrationData.port,
+		Username: migrationData.username,
+		Password: migrationData.password,
 	})
 	defer c.Close()
 
