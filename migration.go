@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -153,7 +152,11 @@ func main() {
 	} else {
 		migrationData.CreateShards()
 		//Map WSP to TSM
-		migrationData.MapWSPToTSMByShard()
+		err := migrationData.MapWSPToTSMByShard()
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
 	}
 	timeend := time.Now()
 	migrationData.PrintSummary(timeend.Sub(timestart).String())
@@ -367,7 +370,7 @@ func (migrationData *MigrationData) CreateShards() {
 
 // For every shard, gets the whisper data which overlaps the time range of shard
 // and  Writes to the respective TSM file
-func (migrationData *MigrationData) MapWSPToTSMByShard() {
+func (migrationData *MigrationData) MapWSPToTSMByShard() error {
 	var from, until time.Time
 	for _, shard := range migrationData.shards {
 		from = shard.from
@@ -384,9 +387,13 @@ func (migrationData *MigrationData) MapWSPToTSMByShard() {
 		}()
 		//Write the TSM data
 		filename := migrationData.GetTSMFileName(shard)
-		migrationData.WriteTSMPoints(filename, <-ch)
+		err := migrationData.WriteTSMPoints(filename, <-ch)
+		if err != nil {
+			fmt.Println("Error in TSM Writing")
+			return err
+		}
 	}
-	return
+	return nil
 }
 
 //For every whisper file, maps whisper data points to TSM data points for
@@ -401,11 +408,6 @@ func (migrationData *MigrationData) MapWSPToTSMByWhisperFile(from time.Time, unt
 		fmt.Println("Migrating Data From ", wspFile, "For TimeRange ", from, until, "Size", w.Header.Archives[0].Size())
 		if err != nil {
 			log.Fatal(err)
-		}
-		wspTime, _ := w.GetOldest()
-		if from.Before(time.Unix(int64(wspTime), 0)) {
-			w.Close()
-			continue
 		}
 
 		//the first argument is interval, since it's not required for migration
@@ -450,23 +452,23 @@ func (migrationData *MigrationData) GetTSMFileName(shard ShardInfo) string {
 	retentionPolicy := "/default/" //TODO:...
 	shardName := shard.id.String() + "/"
 	filename := "000000001-000000002.tsm" // TODO:..
-	filePath := migrationData.influxDataDir + migrationData.dbName +
+	filePath := migrationData.influxDataDir + "/" + migrationData.dbName +
 		retentionPolicy + shardName + filename
 	return filePath
 }
 
 // Write TSMPoints data to TSM files
 func (migrationData *MigrationData) WriteTSMPoints(filename string,
-	tsmPoints []TsmPoint) {
+	tsmPoints []TsmPoint) error {
 
 	if len(tsmPoints) == 0 {
-		return
+		return nil
 	}
 	// Open tsm file for writing
 	f, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
-		fmt.Println("File Open Error")
-		return
+		fmt.Println(err)
+		return err
 	}
 	defer f.Close()
 
@@ -489,23 +491,33 @@ func (migrationData *MigrationData) WriteTSMPoints(filename string,
 	}
 	// Should not write index if there are no writes
 	if writes == 0 {
-		return
+		return nil
 	}
 	//Write index
 	if err := tsmWriter.WriteIndex(); err != nil {
 		panic(fmt.Sprintf("write TSM index: %v", err))
 	}
 
-	fileinfo, err := f.Stat()
-	if err != nil {
-		fmt.Println("Could not read filestat", err)
-		return
-	}
-	migrationData.tsmFileSize = migrationData.tsmFileSize + fileinfo.Size()
-	fmt.Println("TSM File ", filename, "Size ", fileinfo.Size())
 	if err := tsmWriter.Close(); err != nil {
 		panic(fmt.Sprintf("write TSM close: %v", err))
 	}
+
+	// Opening the file again, just to check size
+	f1, err := os.OpenFile(filename, os.O_RDWR, 0666)
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	defer f1.Close()
+
+	fileinfo1, err := f1.Stat()
+	if err != nil {
+		fmt.Println("Could not read filestat", err)
+		return err
+	}
+	migrationData.tsmFileSize = migrationData.tsmFileSize + fileinfo1.Size()
+	fmt.Println("TSM File ", filename, "Size ", fileinfo1.Size())
+	return err
 }
 
 //Create TSM Key from measurement, tags and field
@@ -586,9 +598,11 @@ func (migrationData *MigrationData) PrintSummary(duration string) {
 	fmt.Printf("|------------------------------------|\n")
 	fmt.Printf("| No. of whisper files migrated %d|\n", len(migrationData.wspFiles))
 	fmt.Printf("| TimeTaken %v |\n", duration)
-	fmt.Printf("| Total Whisper File Size %.4f GB |\n", float64(migrationData.whisperFileSize)/float64(1024*1024*1024))
+	size, unit := formatSize(migrationData.whisperFileSize)
+	fmt.Printf("| Total Whisper File Size %.2f %s |\n", size, unit)
 	if migrationData.option == "TSMW" {
-		fmt.Printf("| Total TSM File Size     %.4f GB |\n", float64(migrationData.tsmFileSize)/float64(1024*1024*1024))
+		size, unit := formatSize(migrationData.tsmFileSize)
+		fmt.Printf("| Total TSM File Size     %.2f %s |\n", size, unit)
 		var percentage float64
 		percentage = float64(migrationData.whisperFileSize-migrationData.tsmFileSize) / float64(migrationData.whisperFileSize) * 100.0
 		fmt.Printf("| Percentage of size reduction %.2f\n", percentage)
@@ -614,13 +628,11 @@ func (migrationData *MigrationData) WriteUsingV2() {
 		return
 	}
 
-	totalPoints := 0
 	var bp client.BatchPoints
 	bp, _ = client.NewBatchPoints(client.BatchPointsConfig{
 		Database:  migrationData.dbName,
 		Precision: "s",
 	})
-	var wg sync.WaitGroup
 
 	for _, wspFile := range migrationData.wspFiles {
 		w, err := whisper.Open(wspFile)
@@ -628,12 +640,6 @@ func (migrationData *MigrationData) WriteUsingV2() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		wspTime, _ := w.GetOldest()
-		if from.After(time.Unix(int64(wspTime), 0)) {
-			w.Close()
-			continue
-		}
-
 		//the first argument is interval, since it's not required for migration
 		//using _
 		_, wspPoints, err := w.FetchUntilTime(from, until)
@@ -674,22 +680,21 @@ func (migrationData *MigrationData) WriteUsingV2() {
 			pt, _ := client.NewPoint(mtf.Measurement, tags, fields,
 				time.Unix(int64(wspPoint.Timestamp), 0))
 			bp.AddPoint(pt)
-
-			totalPoints = totalPoints + 1
-			if totalPoints >= 5000 {
-				wg.Add(1)
-				go func() {
-					c.Write(bp)
-					defer wg.Done()
-				}()
-				totalPoints = 0
-				bp, _ = client.NewBatchPoints(client.BatchPointsConfig{
-					Database:  migrationData.dbName,
-					Precision: "s",
-				})
-			}
 		}
+		c.Write(bp)
 	}
-	wg.Wait()
 	return
+}
+
+func formatSize(size int64) (float64, string) {
+	if size < 1024 {
+		return float64(size), "B"
+	}
+	if size < 1048576 {
+		return float64(size) / float64(1024), "KB"
+	}
+	if size < 1073741824 {
+		return float64(size) / float64(1048576), "MB"
+	}
+	return float64(size) / float64(1073741824), "GB"
 }
