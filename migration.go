@@ -96,7 +96,7 @@ func main() {
 		port            = flag.String("port", "8086", "Port on which influxdb is running")
 		username        = flag.String("username", "NULL", "Username for influxdb auth")
 		password        = flag.String("password", "NULL", "Password for influxdb auth")
-		wspinfo     = flag.Bool("wspinfo", false, "Whisper file information")
+		wspinfo         = flag.Bool("wspinfo", false, "Whisper file information")
 	)
 	flag.Parse()
 
@@ -157,8 +157,8 @@ func main() {
 	}
 
 	if err := migrationData.ReadTagConfig(*tagConfigFile); err != nil {
-		 fmt.Printf("Error in Parsing the Config file : %s\n",err)
-		 return
+		fmt.Printf("Error in Parsing the Config file : %s\n", err)
+		return
 	}
 	migrationData.FindWhisperFiles(*wspPath)
 	if len(migrationData.wspFiles) == 0 {
@@ -338,7 +338,7 @@ func (migrationData *MigrationData) PreviewMTF() {
 
 func (migrationData *MigrationData) CreateShards() error {
 	c, _ := client.NewHTTPClient(client.HTTPConfig{
-		Addr: "http://localhost:8086",
+		Addr: migrationData.host + ":" + migrationData.port,
 	})
 	defer c.Close()
 
@@ -603,9 +603,9 @@ func (migrationData *MigrationData) GetMTF(wspFilename string) *MTF {
 
 	//start at i=1, that's #TEXT1 and iterate on all possible # strings in given
 	// pattern
+	mtf.Tags = make([]TagKeyValue, len(tagConfig.Tags))
 	for i := 1; i < len(patternStr)-1; i++ {
 		patternTagValue := strings.Trim(patternStr[i], ".")
-		mtf.Tags = make([]TagKeyValue, len(tagConfig.Tags))
 		//For each # string, find a match in tag values
 		for j, tagkeyvalue := range tagConfig.Tags {
 			if strings.Trim(tagkeyvalue.Tagvalue, "#") == patternTagValue {
