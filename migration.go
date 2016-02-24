@@ -17,7 +17,12 @@ import (
 )
 
 func usage() {
-	log.Fatal(`migration.go -option=TSMW -wspPath=whisper folder
+	log.Fatal(`
+		migration.go -wspinfo -wspPath=whisper folder"
+
+		OR
+
+		migration.go -option=TSMW -wspPath=whisper folder
 		-influxDataDir=influx data folder
 		-from=<2015-11-01> -until=<2015-12-30> -dbname=migrated
 		-retentionPolicy=default -tagconfig=config.json
@@ -91,13 +96,35 @@ func main() {
 		port            = flag.String("port", "8086", "Port on which influxdb is running")
 		username        = flag.String("username", "NULL", "Username for influxdb auth")
 		password        = flag.String("password", "NULL", "Password for influxdb auth")
+		wspinfo     = flag.Bool("wspinfo", false, "Whisper file information")
 	)
 	flag.Parse()
+
+	//Handle whisper information menu
+	if *wspinfo == true {
+		if *wspPath == "NULL" {
+			usage()
+		}
+		migrationData := &MigrationData{}
+
+		migrationData.FindWhisperFiles(*wspPath)
+		if len(migrationData.wspFiles) == 0 {
+			fmt.Println("No Whisper files found")
+			return
+		}
+		if err := migrationData.GetWhisperInfo(); err != nil {
+			fmt.Println("Error in Getting Whisper File information")
+		}
+		return
+	}
+
+	//Handle mandatory parameters
 	if *option == "NULL" || *wspPath == "NULL" || *from == "NULL" ||
 		*tagConfigFile == "NULL" {
 		usage()
 	}
 
+	// InfluxDataDir is mandatory for TSMW option
 	if *option == "TSMW" && *influxDataDir == "NULL" {
 		usage()
 	}
@@ -129,7 +156,10 @@ func main() {
 		migrationData.until = time.Now()
 	}
 
-	migrationData.ReadTagConfig(*tagConfigFile)
+	if err := migrationData.ReadTagConfig(*tagConfigFile); err != nil {
+		 fmt.Printf("Error in Parsing the Config file : %s\n",err)
+		 return
+	}
 	migrationData.FindWhisperFiles(*wspPath)
 	if len(migrationData.wspFiles) == 0 {
 		fmt.Println("No Whisper files found")
@@ -140,9 +170,9 @@ func main() {
 	migrationData.WriteConfigFile(*tagConfigFile)
 	//After the preview, confirm if the user wants to migrate data
 	var userInput string
-	fmt.Println("Do you want to continue the migration? YES/NO :")
+	fmt.Println("Do you want to continue the migration? Yes/No :")
 	fmt.Scanf("%s", &userInput)
-	if userInput != "YES" {
+	if strings.ToUpper(userInput) != "YES" {
 		return
 	}
 	timestart := time.Now()
@@ -150,11 +180,15 @@ func main() {
 	if migrationData.option != "TSMW" {
 		migrationData.WriteUsingV2()
 	} else {
-		migrationData.CreateShards()
-		//Map WSP to TSM
-		err := migrationData.MapWSPToTSMByShard()
+		err := migrationData.CreateShards()
 		if err != nil {
 			fmt.Println(err)
+			return
+		}
+		//Map WSP to TSM
+		err = migrationData.MapWSPToTSMByShard()
+		if err != nil {
+			fmt.Println("Mapping Whisper to TSM by Shard failed : %s\n", err)
 			return
 		}
 	}
@@ -163,13 +197,13 @@ func main() {
 }
 
 // Read the config file and populate migrartionData.tagConfigs
-func (migrationData *MigrationData) ReadTagConfig(filename string) {
+func (migrationData *MigrationData) ReadTagConfig(filename string) error {
 	raw, err := ioutil.ReadFile(filename)
 	if err != nil {
 		fmt.Println(err.Error())
 		os.Exit(1)
 	}
-	json.Unmarshal(raw, &migrationData.tagConfigs)
+	return json.Unmarshal(raw, &migrationData.tagConfigs)
 }
 
 //Write migrationData.tagConfigs to file
@@ -239,10 +273,10 @@ func NewConfig(wspFile string) *TagConfig {
 	fmt.Println("Measurement:", newTagConfig.Measurement)
 	fmt.Println("Tags:", newTagConfig.Tags)
 	fmt.Println("Field:", newTagConfig.Field)
-	fmt.Println("Do you want to add this pattern?(YES/NO):")
+	fmt.Println("Do you want to add this pattern?(Yes/No):")
 	var confirmPattern string
 	fmt.Scanf("%s", &confirmPattern)
-	if confirmPattern == "YES" {
+	if strings.ToUpper(confirmPattern) == "YES" {
 		return newTagConfig
 	} else {
 		return nil
@@ -302,7 +336,7 @@ func (migrationData *MigrationData) PreviewMTF() {
  The shards remain even if the database is dropped
 */
 
-func (migrationData *MigrationData) CreateShards() {
+func (migrationData *MigrationData) CreateShards() error {
 	c, _ := client.NewHTTPClient(client.HTTPConfig{
 		Addr: "http://localhost:8086",
 	})
@@ -312,8 +346,7 @@ func (migrationData *MigrationData) CreateShards() {
 	createDBQuery := client.NewQuery(createDBString, "", "")
 	_, err := c.Query(createDBQuery)
 	if err != nil {
-		fmt.Println(err)
-		return
+		return fmt.Errorf("Error while creating Database : %s\n", err)
 	}
 
 	// Create a new point batch
@@ -338,8 +371,7 @@ func (migrationData *MigrationData) CreateShards() {
 	query := client.NewQuery("Show Shard Groups", "", "")
 	response, err := c.Query(query)
 	if err != nil {
-		fmt.Println(err)
-		return
+		return fmt.Errorf("Error in Querying : %s\n", err)
 	}
 	var index int = 0
 	var colname string
@@ -359,13 +391,12 @@ func (migrationData *MigrationData) CreateShards() {
 	}
 
 	//Once shards are created, this measurement is not required
-	dropMeasurementQuery := client.NewQuery("Drop Measurement dummy", "", "")
+	dropMeasurementQuery := client.NewQuery("Drop Database dummy", "", "")
 	_, err = c.Query(dropMeasurementQuery)
 	if err != nil {
-		fmt.Println(err)
-		return
+		return fmt.Errorf("Error in Dropping Dummy DB : %s\n", err)
 	}
-	return
+	return nil
 }
 
 // For every shard, gets the whisper data which overlaps the time range of shard
@@ -389,8 +420,7 @@ func (migrationData *MigrationData) MapWSPToTSMByShard() error {
 		filename := migrationData.GetTSMFileName(shard)
 		err := migrationData.WriteTSMPoints(filename, <-ch)
 		if err != nil {
-			fmt.Println("Error in TSM Writing")
-			return err
+			return fmt.Errorf("Error in TSM Writing")
 		}
 	}
 	return nil
@@ -636,11 +666,11 @@ func (migrationData *MigrationData) WriteUsingV2() {
 
 	for _, wspFile := range migrationData.wspFiles {
 		w, err := whisper.Open(wspFile)
-		fmt.Println("Migrating Data From ", wspFile, "For TimeRange ", from, until, "Size", w.Header.Archives[0].Size())
 		if err != nil {
 			log.Fatal(err)
 		}
-		//the first argument is interval, since it's not required for migration
+		fmt.Println("Migrating Data From ", wspFile, "For TimeRange ", from, until, "Size", w.Header.Archives[0].Size())
+		//the first return argument is interval, since it's not required for migration
 		//using _
 		_, wspPoints, err := w.FetchUntilTime(from, until)
 		w.Close()
@@ -697,4 +727,27 @@ func formatSize(size int64) (float64, string) {
 		return float64(size) / float64(1048576), "MB"
 	}
 	return float64(size) / float64(1073741824), "GB"
+}
+
+func (migrationData *MigrationData) GetWhisperInfo() error {
+	for _, wspFile := range migrationData.wspFiles {
+		w, err := whisper.Open(wspFile)
+		if err != nil {
+			return err
+		}
+		t, err := w.GetOldest()
+		if err != nil {
+			return err
+		}
+		_, pts, err := w.Fetch(t)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Whisper File : %s\n", wspFile)
+		fmt.Println("Oldest Data in File : ", time.Unix(int64(t), 0))
+		fmt.Println("Number of whisper points : ", len(pts))
+		fmt.Println("-----------------------------------------------------------------------")
+		w.Close()
+	}
+	return nil
 }
