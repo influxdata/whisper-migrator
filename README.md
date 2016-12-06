@@ -28,3 +28,19 @@ This tool can be used in three modes
 Tag Config file
 
   This file is required to specify tags and measurement name for a given pattern. Please see the sample tagconfig file, migration_config.json
+
+## Replacement pattern
+
+This tool uses golang regexp to process patterns.
+Those are not escaped, so this means you can hack the way it works or run into various issues using it.
+Be careful.
+
+You can use in the metric pattern the format `{{ text1 }}` as a placeholder to a value that you will then be able to reuse in *tags*, *measurement* or *field*. 
+
+The value `{{ text1 }}` is simply replaced by a simple regexp expression: `([^.]+)`.
+
+If no *measurement* is specified, the default value is the last part of the measurement.
+
+If no *field* is specified, the default will be `value`.
+
+Example: For the pattern `carbon.relays.{{ host }}.memUsage`, `measurement=memUsage` and `field=value`

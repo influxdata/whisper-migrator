@@ -1,37 +1,41 @@
 [
   {
-    "pattern": "carbon.relays.#TEXT1.#TEXT2",
-    "measurement": "#TEXT2",
+    "pattern": "carbon.relays.node-{{ text1 }}-{{ text2 }}.{{ text3 }}",
+    "measurement": "{{ text3 }}",
     "tags": [
       {
         "tagkey": "host",
-        "tagvalue": "#TEXT1"
+        "tagvalue": "{{ text1 }}"
+      },
+      {
+        "tagkey": "country",
+        "tagvalue": "{{ text2 }}"
       }
     ],
     "field": "value"
   },
   {
-    "pattern": "TLM.Sentinel.#TEXT1.#TEXT2.#TEXT3",
-    "measurement": "#TEXT3",
+    "pattern": "TLM.Sentinel.{{ text1 }}.{{ text2 }}.{{ text3 }}",
+    "measurement": "{{ text3 }}",
     "tags": [
       {
         "tagkey": "host",
-        "tagvalue": "#TEXT1"
+        "tagvalue": "{{ text1 }}"
       },
       {
         "tagkey": "computing",
-        "tagvalue": "#TEXT2"
+        "tagvalue": "{{ text2 }}"
       }
     ],
     "field": "something"
   },
   {
-    "pattern": "carbon.agents.#TEXT1.#TEXT2",
-    "measurement": "#TEXT2",
+    "pattern": "carbon.agents.{{ text1 }}.{{ text2 }}",
+    "measurement": "{{ text2 }}",
     "tags": [
       {
         "tagkey": "host",
-        "tagvalue": "#TEXT1"
+        "tagvalue": "{{ text1 }}"
       }
     ],
     "field": "value"
