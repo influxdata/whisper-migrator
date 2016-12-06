@@ -324,7 +324,7 @@ func (migrationData *MigrationData) PreviewMTF() {
 				Field: tagConfig.Field}
 		}
 		key := CreateTSMKey(mtf)
-		fmt.Println("\nWhisper File", wspFile, "\nTSM Key->", key)
+		fmt.Println("\nWhisper File", wspFile, "\nTSM Key->", key, "\n")
 	}
 }
 
@@ -570,53 +570,68 @@ func (migrationData *MigrationData) GetMTF(wspFilename string) *MTF {
 	wspFilename = strings.Replace(wspFilename, ",", "_", -1)
 	wspFilename = strings.Replace(wspFilename, " ", "_", -1)
 
-	var patternStr []string
-	var matches [][]int
+	// Filename matching
+	// TODO catch strings that don't match until the end
 	var tagConfig TagConfig
+	var matched []string
+	var wildcards [][]string
 	filenameMatched := false
 	for _, tagConfig = range migrationData.tagConfigs {
-		patternStr = strings.Split(tagConfig.Pattern, "#")
-		re := regexp.MustCompile(patternStr[0])
-		//FindAllIndex returns array of start and end index of the match
-		matches = re.FindAllIndex([]byte(wspFilename), -1)
-		if matches != nil {
+		reWild := regexp.MustCompile("{{\\s*([a-zA-Z0-9]+)\\s*}}")
+
+		// Prepare regex pattern
+		pattern := strings.Replace(tagConfig.Pattern, ".", "\\.", -1)
+		pattern = reWild.ReplaceAllLiteralString(pattern, "([^.]+)")
+
+		// List the matching values (Base and groups)
+		re := regexp.MustCompile(pattern)
+		matched = re.FindAllStringSubmatch(wspFilename, -1)[0]
+
+		if matched != nil {
 			filenameMatched = true
+			// List of replacement wildcards like "{{ host }}"
+			wildcards = reWild.FindAllStringSubmatch(tagConfig.Pattern, -1)
 			break
 		}
 	}
 	if filenameMatched == false {
 		return nil
 	}
-	//extract the string starting at end of the matched pattern
-	//e.g. carbon.relays.eud3-pr-mutgra1-a.whitelistRejects,
-	// the remaining would be eud3-pr-mutgra1-a.whitelistRejects
-	remaining := wspFilename[matches[0][1]:]
 
-	//Split the remaining string on .
-	//e.g. Now the remArr holds eud3-pr-mutgra1-a, whitelistRejects
-	remArr := strings.Split(remaining, ".")
 
-	//patternStr contains pattern split on #
-	//e.g. patternStr[0]carbon.relays. , patternStr[1]TEXT1. , patternStr[2]TEXT2.
+	// Create the migration object
 	var mtf MTF
 
-	//start at i=1, that's #TEXT1 and iterate on all possible # strings in given
-	// pattern
+	// In case measurement and field aren't set in the config file
+	if tagConfig.Measurement != "" {
+		mtf.Measurement = tagConfig.Measurement
+	} else {
+		parts := strings.Split(wspFilename, ".")
+		mtf.Measurement = parts[len(parts)-1]
+	}
+	if tagConfig.Field != "" {
+		mtf.Field = tagConfig.Field
+	} else {
+		mtf.Field = "value"
+	}
 	mtf.Tags = make([]TagKeyValue, len(tagConfig.Tags))
-	for i := 1; i < len(patternStr)-1; i++ {
-		patternTagValue := strings.Trim(patternStr[i], ".")
-		//For each # string, find a match in tag values
-		for j, tagkeyvalue := range tagConfig.Tags {
-			if strings.Trim(tagkeyvalue.Tagvalue, "#") == patternTagValue {
-				mtf.Tags[j].Tagkey = tagkeyvalue.Tagkey
-				//Tag #value is replaced with the actual value
-				mtf.Tags[j].Tagvalue = remArr[i-1]
-			}
+	copy(mtf.Tags, tagConfig.Tags)
+
+	// Replace "{{ wild }}" with matched values in order
+	// (reversed to avoid overlapping of bigger numbers)
+	// TODO issues if matched contains "$n"
+	for i := len(matched) - 1; i > 0; i-- {
+		re := regexp.MustCompile("{{\\s" + wildcards[i - 1][1] + "\\s}}")
+
+		mtf.Measurement = re.ReplaceAllLiteralString(mtf.Measurement, matched[i])
+		mtf.Field = re.ReplaceAllLiteralString(mtf.Field, matched[i])
+
+		for j := 0; j < len(mtf.Tags); j++ {
+			mtf.Tags[j].Tagkey = re.ReplaceAllLiteralString(mtf.Tags[j].Tagkey, matched[i])
+			mtf.Tags[j].Tagvalue = re.ReplaceAllLiteralString(mtf.Tags[j].Tagvalue, matched[i])
 		}
 	}
-	// Assign the last string as measurement
-	mtf.Measurement = remArr[len(remArr)-1]
-	mtf.Field = tagConfig.Field
+
 	return &mtf
 }
 
