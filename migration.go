@@ -324,7 +324,7 @@ func (migrationData *MigrationData) PreviewMTF() {
 				Field: tagConfig.Field}
 		}
 		key := CreateTSMKey(mtf)
-		fmt.Println("\nWhisper File", wspFile, "\nTSM Key->", key)
+		fmt.Println("\nWhisper File", wspFile, "\nTSM Key->", key, "\n")
 	}
 }
 
@@ -574,11 +574,14 @@ func (migrationData *MigrationData) GetMTF(wspFilename string) *MTF {
 	// TODO catch strings that don't match until the end
 	var tagConfig TagConfig
 	var matched []string
+	var wildcards [][]string
 	filenameMatched := false
 	for _, tagConfig = range migrationData.tagConfigs {
+		reWild := regexp.MustCompile("{{\\s*([a-zA-Z0-9]+)\\s*}}")
+
 		// Prepare regex pattern
 		pattern := strings.Replace(tagConfig.Pattern, ".", "\\.", -1)
-		pattern = strings.Replace(pattern, "*", "([^.]+)", -1)
+		pattern = reWild.ReplaceAllLiteralString(pattern, "([^.]+)")
 
 		// List the matching values (Base and groups)
 		re := regexp.MustCompile(pattern)
@@ -586,6 +589,8 @@ func (migrationData *MigrationData) GetMTF(wspFilename string) *MTF {
 
 		if matched != nil {
 			filenameMatched = true
+			// List of replacement wildcards like "{{ host }}"
+			wildcards = reWild.FindAllStringSubmatch(tagConfig.Pattern, -1)
 			break
 		}
 	}
@@ -612,18 +617,18 @@ func (migrationData *MigrationData) GetMTF(wspFilename string) *MTF {
 	mtf.Tags = make([]TagKeyValue, len(tagConfig.Tags))
 	copy(mtf.Tags, tagConfig.Tags)
 
-	// Replace $# with matched values in order
+	// Replace "{{ wild }}" with matched values in order
 	// (reversed to avoid overlapping of bigger numbers)
 	// TODO issues if matched contains "$n"
 	for i := len(matched) - 1; i > 0; i-- {
-		wildcard := fmt.Sprintf("$%d", i)
+		re := regexp.MustCompile("{{\\s" + wildcards[i - 1][1] + "\\s}}")
 
-		mtf.Measurement = strings.Replace(mtf.Measurement, wildcard, matched[i], -1)
-		mtf.Field = strings.Replace(mtf.Field, wildcard, matched[i], -1)
+		mtf.Measurement = re.ReplaceAllLiteralString(mtf.Measurement, matched[i])
+		mtf.Field = re.ReplaceAllLiteralString(mtf.Field, matched[i])
 
 		for j := 0; j < len(mtf.Tags); j++ {
-			mtf.Tags[j].Tagkey = strings.Replace(mtf.Tags[j].Tagkey, wildcard, matched[i], -1)
-			mtf.Tags[j].Tagvalue = strings.Replace(mtf.Tags[j].Tagvalue, wildcard, matched[i], -1)
+			mtf.Tags[j].Tagkey = re.ReplaceAllLiteralString(mtf.Tags[j].Tagkey, matched[i])
+			mtf.Tags[j].Tagvalue = re.ReplaceAllLiteralString(mtf.Tags[j].Tagvalue, matched[i])
 		}
 	}
 
