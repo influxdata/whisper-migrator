@@ -512,7 +512,7 @@ func (migrationData *MigrationData) WriteTSMPoints(filename string,
 	for _, tsmPoint := range tsmPoints {
 		//fmt.Println(i, tsmPoint.key)
 		if len(tsmPoint.values) > 0 {
-			if err := tsmWriter.Write(tsmPoint.key, tsmPoint.values); err != nil {
+			if err := tsmWriter.Write([]byte(tsmPoint.key), tsmPoint.values); err != nil {
 				panic(fmt.Sprintf("write TSM value: %v", err))
 			}
 			writes = writes + 1
